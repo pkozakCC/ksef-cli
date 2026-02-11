@@ -77,7 +77,7 @@ def _inject_local_fonts(html_string):
     return html_string
 
 
-def transform_to_pdf(xml_path, output_dir):
+def transform_to_pdf(xml_path, output_dir, pdf_name=None):
     """Transformuje plik XML faktury do PDF."""
     xml_tree = etree.parse(xml_path)
     namespace = detect_namespace(xml_tree)
@@ -89,8 +89,11 @@ def transform_to_pdf(xml_path, output_dir):
 
     html_string = _inject_local_fonts(str(html_result))
 
-    basename = os.path.splitext(os.path.basename(xml_path))[0]
-    pdf_path = os.path.join(output_dir, f"{basename}.pdf")
+    if pdf_name:
+        pdf_path = os.path.join(output_dir, pdf_name)
+    else:
+        basename = os.path.splitext(os.path.basename(xml_path))[0]
+        pdf_path = os.path.join(output_dir, f"{basename}.pdf")
 
     HTML(string=html_string).write_pdf(pdf_path)
     return pdf_path

@@ -2,10 +2,12 @@
 """Interaktywny skrypt do przeglądu i akceptacji faktur KSeF."""
 
 import os
+import re
 import sys
 import glob
 import json
 import subprocess
+import unicodedata
 from datetime import datetime, date
 from lxml import etree
 
@@ -31,13 +33,60 @@ REJECTED = "rejected"
 console = Console()
 
 
+# --- Nazewnictwo PDF ---
+
+def normalize_filename(text, max_len):
+    """Normalizuje tekst do użycia w nazwie pliku (ASCII uppercase, myślniki)."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    ascii_text = "".join(c for c in nfkd if not unicodedata.combining(c))
+    ascii_text = re.sub(r"[^A-Za-z0-9]+", "-", ascii_text)
+    ascii_text = re.sub(r"-{2,}", "-", ascii_text)
+    ascii_text = ascii_text.strip("-").upper()
+    return ascii_text[:max_len]
+
+
+def pdf_filename(inv):
+    """Buduje czytelną nazwę PDF z danych faktury."""
+    data_raw = inv.get("data", "")
+    try:
+        data = datetime.strptime(data_raw, "%Y-%m-%d").strftime("%Y%m%d")
+    except ValueError:
+        data = data_raw.replace("-", "")[:8]
+
+    sprzedawca = normalize_filename(inv.get("nazwa", ""), 20)
+
+    # 8 (data) + 1 (_) + len(sprzedawca) + 1 (_) = 10 + len(sprzedawca)
+    # max 59 znaków łącznie (bez .pdf), więc numer dostaje resztę
+    used = len(data) + 1 + len(sprzedawca) + 1  # data_sprzedawca_
+    numer_max = max(59 - used, 10)
+
+    numer_raw = inv.get("numer", "")
+    if not numer_raw and inv.get("pozycje"):
+        # Użyj opisu największej pozycji jako fallback
+        best = max(inv["pozycje"], key=lambda p: float(p.get("kwota_netto") or 0), default=None)
+        if best:
+            numer_raw = best.get("opis", "")
+    numer = normalize_filename(numer_raw, numer_max)
+
+    return f"{data}_{sprzedawca}_{numer}.pdf"
+
+
 # --- Persystencja stanu ---
 
 def load_review_state():
-    """Ładuje zapisane decyzje z pliku stanu."""
+    """Ładuje zapisane decyzje z pliku stanu.
+
+    Obsługuje stary format (wartość = string) i nowy (wartość = obiekt).
+    Stary format jest migrowany do nowego przy odczycie.
+    """
     if os.path.exists(REVIEW_STATE_FILE):
         with open(REVIEW_STATE_FILE, "r") as f:
-            return json.load(f)
+            raw = json.load(f)
+        # Migracja starego formatu: "key": "accepted" → "key": {"decision": "accepted"}
+        for key, value in raw.items():
+            if isinstance(value, str):
+                raw[key] = {"decision": value}
+        return raw
     return {}
 
 
@@ -320,7 +369,7 @@ class InvoiceReviewApp(App):
             key = invoice_key(inv)
             self._inv_by_key[key] = inv
             if key in review_state:
-                self.decisions[key] = review_state[key]
+                self.decisions[key] = review_state[key]["decision"]
 
     def compose(self) -> ComposeResult:
         yield Static("", id="summary")
@@ -448,7 +497,10 @@ class InvoiceReviewApp(App):
                 timeout=5,
             )
             return
-        self.review_state.update(self.decisions)
+        for key, decision in self.decisions.items():
+            existing = self.review_state.get(key, {})
+            existing["decision"] = decision
+            self.review_state[key] = existing
         save_review_state(self.review_state)
         accepted = [
             self._inv_by_key[k] for k, v in self.decisions.items() if v == ACCEPTED
@@ -461,7 +513,7 @@ class InvoiceReviewApp(App):
 
 # --- Generowanie PDF ---
 
-def generate_pdfs(accepted, year_month):
+def generate_pdfs(accepted, year_month, review_state):
     """Generuje PDF-y dla zaakceptowanych faktur."""
     from transform_invoices import transform_to_pdf
 
@@ -472,8 +524,9 @@ def generate_pdfs(accepted, year_month):
     success = 0
     for inv in accepted:
         filename = os.path.basename(inv["path"])
+        pdf_name = pdf_filename(inv)
         try:
-            pdf_path = transform_to_pdf(inv["path"], output_dir)
+            pdf_path = transform_to_pdf(inv["path"], output_dir, pdf_name=pdf_name)
             # Ustaw datę modyfikacji PDF na datę wystawienia faktury
             if inv.get("data"):
                 try:
@@ -482,12 +535,34 @@ def generate_pdfs(accepted, year_month):
                     os.utime(pdf_path, (ts, ts))
                 except (ValueError, OSError):
                     pass
-            console.print(f"  [green]OK:[/green] {filename} -> {os.path.basename(pdf_path)}")
+            # Zapisz nazwę PDF w stanie
+            key = invoice_key(inv)
+            if key in review_state:
+                review_state[key]["pdf"] = pdf_name
+            console.print(f"  [green]OK:[/green] {filename} -> {pdf_name}")
             success += 1
         except Exception as e:
             console.print(f"  [red]BŁĄD:[/red] {filename} — {e}")
 
+    save_review_state(review_state)
     console.print(f"\n[bold]Wygenerowano {success}/{len(accepted)} PDF-ów w {output_dir}/[/bold]")
+
+
+def cleanup_rejected_pdfs(review_state, year_month):
+    """Usuwa PDF-y faktur, których decyzja zmieniła się na rejected."""
+    output_dir = os.path.join(OUTPUT_BASE_DIR, year_month)
+    removed = 0
+    for key, entry in review_state.items():
+        if entry.get("decision") == REJECTED and entry.get("pdf"):
+            pdf_path = os.path.join(output_dir, entry["pdf"])
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+                console.print(f"  [yellow]Usunięto PDF:[/yellow] {entry['pdf']}")
+                removed += 1
+            del entry["pdf"]
+    if removed:
+        save_review_state(review_state)
+        console.print(f"[bold]Usunięto {removed} PDF-ów odrzuconych faktur.[/bold]")
 
 
 # --- Main ---
@@ -518,8 +593,11 @@ def main():
 
     app = InvoiceReviewApp(invoices, review_state)
     result = app.run()
+    # Przeładuj stan — action_save() mógł go zaktualizować
+    review_state = load_review_state()
+    cleanup_rejected_pdfs(review_state, year_month)
     if result:
-        generate_pdfs(result, year_month)
+        generate_pdfs(result, year_month, review_state)
 
 
 if __name__ == "__main__":
