@@ -19,7 +19,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Static
+from textual.widgets import DataTable, Footer, Input, Static
 from textual.containers import Vertical
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -259,12 +259,14 @@ def load_invoices(year_month):
 
 # --- Wyświetlanie ---
 
-def _status_icon(decision):
+def _status_icon(decision, is_new=False):
     """Zwraca ikonę statusu na podstawie decyzji."""
     if decision == ACCEPTED:
         return Text("V", style="bold green")
     if decision == REJECTED:
         return Text("X", style="bold red")
+    if is_new:
+        return Text("*", style="bold cyan")
     return Text("?", style="bold yellow")
 
 
@@ -357,7 +359,10 @@ class InvoiceReviewApp(App):
         Binding("space", "toggle", "Przełącz"),
         Binding("a", "accept", "Akceptuj"),
         Binding("r", "reject", "Odrzuć"),
+        Binding("A", "accept_all", "V wszystkie"),
+        Binding("R", "reject_all", "X wszystkie"),
         Binding("d", "detail", "d/Enter Szczegóły"),
+        Binding("slash", "toggle_filter", "/ Szukaj"),
         Binding("s", "save", "Zapisz"),
         Binding("q", "quit_app", "Wyjdź"),
     ]
@@ -383,6 +388,10 @@ class InvoiceReviewApp(App):
         height: auto;
         max-height: 8;
     }
+    #filter-input {
+        display: none;
+        dock: top;
+    }
     """
 
     def __init__(self, invoices, review_state):
@@ -398,9 +407,15 @@ class InvoiceReviewApp(App):
                 self.decisions[key] = review_state[key]["decision"]
         self._initial_decisions = dict(self.decisions)
         self._last_quit_press = 0.0
+        self._new_keys = {invoice_key(inv) for inv in invoices if invoice_key(inv) not in review_state}
+        self._display_invoices = list(self.invoices)
+        self._filter_text = ""
+        self._sort_column = None
+        self._sort_reverse = False
 
     def compose(self) -> ComposeResult:
         yield Static("", id="summary")
+        yield Input(id="filter-input", placeholder="Szukaj...", disabled=True)
         yield DataTable(id="invoices", cursor_type="row")
         yield Static("Pozycje faktury", id="positions-label")
         yield DataTable(id="positions", cursor_type="none")
@@ -414,22 +429,19 @@ class InvoiceReviewApp(App):
             f"Netto ({waluta})", f"Brutto ({waluta})",
         )
         self._status_col = col_keys[1]
-        for i, inv in enumerate(self.invoices):
-            key = invoice_key(inv)
-            decision = self.decisions.get(key)
-            icon = _status_icon(decision)
-            table.add_row(
-                str(i + 1), icon, inv["data"], inv["nazwa"],
-                inv["numer"],
-                _fmt_amount(inv["kwota_netto"]),
-                _fmt_amount(inv["kwota_brutto"]),
-                key=key,
-            )
+        self._col_sort_map = {
+            col_keys[2]: "data",
+            col_keys[3]: "nazwa",
+            col_keys[4]: "numer",
+            col_keys[5]: "kwota_netto",
+            col_keys[6]: "kwota_brutto",
+        }
         pos_table = self.query_one("#positions", DataTable)
         pos_table.add_columns("#", "Opis", f"Netto ({waluta})", f"Brutto ({waluta})")
-        self._update_summary()
-        if self.invoices:
-            self._update_positions(invoice_key(self.invoices[0]))
+        self._rebuild_table()
+        if self._display_invoices:
+            self._update_positions(invoice_key(self._display_invoices[0]))
+        table.focus()
 
     def _get_current_key(self):
         """Zwraca klucz aktualnie podświetlonego wiersza."""
@@ -439,11 +451,60 @@ class InvoiceReviewApp(App):
         row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
         return row_key.value
 
+    def _rebuild_table(self):
+        """Przebudowuje wiersze tabeli na podstawie _display_invoices."""
+        table = self.query_one("#invoices", DataTable)
+        table.clear()
+        for i, inv in enumerate(self._display_invoices):
+            key = invoice_key(inv)
+            decision = self.decisions.get(key)
+            is_new = key in self._new_keys
+            icon = _status_icon(decision, is_new)
+            table.add_row(
+                str(i + 1), icon, inv["data"], inv["nazwa"],
+                inv["numer"],
+                _fmt_amount(inv["kwota_netto"]),
+                _fmt_amount(inv["kwota_brutto"]),
+                key=key,
+            )
+        self._update_summary()
+
+    def _apply_filter_and_sort(self):
+        """Filtruje i sortuje faktury, przebudowuje tabelę."""
+        filtered = self.invoices
+        if self._filter_text:
+            q = self._filter_text.lower()
+            def match(inv):
+                if q in inv["nazwa"].lower():
+                    return True
+                if q in inv["numer"].lower():
+                    return True
+                if q in inv["data"].lower():
+                    return True
+                for poz in inv["pozycje"]:
+                    if q in poz["opis"].lower():
+                        return True
+                return False
+            filtered = [inv for inv in filtered if match(inv)]
+        if self._sort_column:
+            def sort_key(inv):
+                val = inv.get(self._sort_column, "")
+                if self._sort_column in ("kwota_netto", "kwota_brutto"):
+                    try:
+                        return float(val) if val else 0.0
+                    except ValueError:
+                        return 0.0
+                return val.lower() if isinstance(val, str) else str(val).lower()
+            filtered = sorted(filtered, key=sort_key, reverse=self._sort_reverse)
+        self._display_invoices = filtered
+        self._rebuild_table()
+
     def _refresh_row(self, key):
         """Aktualizuje ikonę statusu w wierszu."""
         table = self.query_one("#invoices", DataTable)
         decision = self.decisions.get(key)
-        icon = _status_icon(decision)
+        is_new = key in self._new_keys
+        icon = _status_icon(decision, is_new)
         table.update_cell(key, self._status_col, icon)
 
     def _update_summary(self):
@@ -484,9 +545,12 @@ class InvoiceReviewApp(App):
         """Aktualizuje tabelę pozycji dla podanej faktury."""
         pos_table = self.query_one("#positions", DataTable)
         pos_table.clear()
+        label = self.query_one("#positions-label", Static)
         inv = self._inv_by_key.get(key)
         if not inv:
+            label.update("Pozycje faktury")
             return
+        label.update(f"Pozycje: {inv['nazwa']} — {inv['numer']}")
         if inv["pozycje"]:
             for j, poz in enumerate(inv["pozycje"], 1):
                 pos_table.add_row(
@@ -546,6 +610,63 @@ class InvoiceReviewApp(App):
         key = event.row_key.value
         if key in self._inv_by_key:
             self.push_screen(InvoiceDetailScreen(self._inv_by_key[key]))
+
+    def action_accept_all(self) -> None:
+        """Akceptuje wszystkie widoczne (przefiltrowane) faktury."""
+        for inv in self._display_invoices:
+            self.decisions[invoice_key(inv)] = ACCEPTED
+        self._rebuild_table()
+
+    def action_reject_all(self) -> None:
+        """Odrzuca wszystkie widoczne (przefiltrowane) faktury."""
+        for inv in self._display_invoices:
+            self.decisions[invoice_key(inv)] = REJECTED
+        self._rebuild_table()
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        """Sortuje tabelę po klikniętej kolumnie."""
+        if event.data_table.id != "invoices":
+            return
+        field = self._col_sort_map.get(event.column_key)
+        if field is None:
+            return
+        if self._sort_column == field:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_column = field
+            self._sort_reverse = False
+        self._apply_filter_and_sort()
+
+    def action_toggle_filter(self) -> None:
+        """Przełącza widoczność pola filtrowania."""
+        filter_input = self.query_one("#filter-input", Input)
+        if not filter_input.display:
+            filter_input.display = True
+            filter_input.disabled = False
+            filter_input.focus()
+        else:
+            filter_input.value = ""
+            filter_input.display = False
+            filter_input.disabled = True
+            self.query_one("#invoices", DataTable).focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Filtruje faktury na bieżąco po wpisaniu tekstu."""
+        if event.input.id == "filter-input":
+            self._filter_text = event.value
+            self._apply_filter_and_sort()
+
+    def on_key(self, event) -> None:
+        """Obsługuje ESC w polu filtrowania."""
+        if event.key == "escape":
+            filter_input = self.query_one("#filter-input", Input)
+            if filter_input.display:
+                filter_input.value = ""
+                filter_input.display = False
+                filter_input.disabled = True
+                self.query_one("#invoices", DataTable).focus()
+                event.prevent_default()
+                event.stop()
 
     def action_save(self) -> None:
         for key, decision in self.decisions.items():
