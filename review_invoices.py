@@ -128,8 +128,21 @@ def parse_invoice(xml_path):
     pozycje = []
     for wiersz in xpath_local(fa, "FaWiersz"):
         opis = text(wiersz, "P_7")
-        kwota_netto = text(wiersz, "P_11") or text(wiersz, "P_11A")
-        pozycje.append({"opis": opis, "kwota_netto": kwota_netto})
+        kwota_netto_str = text(wiersz, "P_11")
+        if not kwota_netto_str:
+            # P_11A to wartość brutto wiersza — przelicz na netto
+            kwota_brutto_wiersz = text(wiersz, "P_11A")
+            stawka_vat = text(wiersz, "P_12")
+            if kwota_brutto_wiersz and stawka_vat:
+                try:
+                    brutto = float(kwota_brutto_wiersz)
+                    vat = float(stawka_vat)
+                    kwota_netto_str = f"{brutto / (1 + vat / 100):.2f}"
+                except (ValueError, ZeroDivisionError):
+                    kwota_netto_str = kwota_brutto_wiersz
+            else:
+                kwota_netto_str = kwota_brutto_wiersz or ""
+        pozycje.append({"opis": opis, "kwota_netto": kwota_netto_str})
 
     return {
         "path": xml_path,
@@ -256,8 +269,18 @@ class InvoiceReviewApp(App):
         background: $accent;
         color: $text;
     }
-    DataTable {
+    #invoices {
         height: 1fr;
+    }
+    #positions-label {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+        text-style: bold;
+    }
+    #positions {
+        height: auto;
+        max-height: 8;
     }
     """
 
@@ -275,11 +298,13 @@ class InvoiceReviewApp(App):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="summary")
-        yield DataTable(cursor_type="row")
+        yield DataTable(id="invoices", cursor_type="row")
+        yield Static("Pozycje faktury", id="positions-label")
+        yield DataTable(id="positions", cursor_type="none")
         yield Footer()
 
     def on_mount(self) -> None:
-        table = self.query_one(DataTable)
+        table = self.query_one("#invoices", DataTable)
         col_keys = table.add_columns("#", " ", "Data", "Kontrahent", "Numer", "Brutto")
         self._status_col = col_keys[1]
         for i, inv in enumerate(self.invoices):
@@ -292,11 +317,15 @@ class InvoiceReviewApp(App):
                 inv["numer"], kwota,
                 key=key,
             )
+        pos_table = self.query_one("#positions", DataTable)
+        pos_table.add_columns("#", "Opis", "Kwota netto")
         self._update_summary()
+        if self.invoices:
+            self._update_positions(invoice_key(self.invoices[0]))
 
     def _get_current_key(self):
         """Zwraca klucz aktualnie podświetlonego wiersza."""
-        table = self.query_one(DataTable)
+        table = self.query_one("#invoices", DataTable)
         if table.row_count == 0:
             return None
         row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
@@ -304,7 +333,7 @@ class InvoiceReviewApp(App):
 
     def _refresh_row(self, key):
         """Aktualizuje ikonę statusu w wierszu."""
-        table = self.query_one(DataTable)
+        table = self.query_one("#invoices", DataTable)
         decision = self.decisions.get(key)
         icon = _status_icon(decision)
         table.update_cell(key, self._status_col, icon)
@@ -321,10 +350,35 @@ class InvoiceReviewApp(App):
 
     def _move_cursor_down(self):
         """Przesuwa kursor o jeden wiersz w dół."""
-        table = self.query_one(DataTable)
+        table = self.query_one("#invoices", DataTable)
         row, col = table.cursor_coordinate
         if row < table.row_count - 1:
             table.move_cursor(row=row + 1)
+
+    def _update_positions(self, key):
+        """Aktualizuje tabelę pozycji dla podanej faktury."""
+        pos_table = self.query_one("#positions", DataTable)
+        pos_table.clear()
+        inv = self._inv_by_key.get(key)
+        if not inv:
+            return
+        if inv["pozycje"]:
+            for j, poz in enumerate(inv["pozycje"], 1):
+                pos_table.add_row(
+                    str(j),
+                    poz["opis"],
+                    f"{poz['kwota_netto']} {inv['waluta']}",
+                )
+        else:
+            pos_table.add_row("", "(brak pozycji)", "")
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Aktualizuje panel pozycji przy zmianie podświetlonego wiersza."""
+        if event.data_table.id != "invoices":
+            return
+        key = event.row_key.value
+        if key in self._inv_by_key:
+            self._update_positions(key)
 
     def action_accept(self) -> None:
         key = self._get_current_key()
