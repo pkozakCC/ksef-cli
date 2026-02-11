@@ -148,9 +148,21 @@ def choose_month():
     if not months:
         console.print("[yellow]Brak faktur w katalogu invoices-raw.[/yellow]")
         sys.exit(0)
+    review_state = load_review_state()
+    choices = []
+    for m in months:
+        month_dir = os.path.join(INVOICES_DIR, m)
+        xml_files = glob.glob(os.path.join(month_dir, "*.xml"))
+        total = len(xml_files)
+        new = sum(1 for f in xml_files if os.path.basename(f) not in review_state)
+        parts = [f"{total} faktur"]
+        if new:
+            parts.append(f"{new} nowych")
+        label = f"{m} ({', '.join(parts)})"
+        choices.append(questionary.Choice(title=label, value=m))
     chosen = questionary.select(
         "Miesiąc do przeglądu:",
-        choices=months,
+        choices=choices,
     ).ask()
     if chosen is None:
         sys.exit(0)
@@ -718,9 +730,15 @@ def generate_pdfs(accepted, year_month, review_state):
 
     console.print(f"\nGenerowanie PDF-ów do [bold]{output_dir}/[/bold]")
     success = 0
+    skipped = 0
     for inv in accepted:
         filename = os.path.basename(inv["path"])
         pdf_name = pdf_filename(inv)
+        pdf_path = os.path.join(output_dir, pdf_name)
+        if os.path.exists(pdf_path):
+            console.print(f"  [dim]SKIP:[/dim] {pdf_name} (już istnieje)")
+            skipped += 1
+            continue
         try:
             pdf_path = transform_to_pdf(inv["path"], output_dir, pdf_name=pdf_name)
             # Ustaw datę modyfikacji PDF na datę wystawienia faktury
@@ -741,7 +759,10 @@ def generate_pdfs(accepted, year_month, review_state):
             console.print(f"  [red]BŁĄD:[/red] {filename} — {e}")
 
     save_review_state(review_state)
-    console.print(f"\n[bold]Wygenerowano {success}/{len(accepted)} PDF-ów w {output_dir}/[/bold]")
+    parts = [f"Wygenerowano {success}/{len(accepted)} PDF-ów"]
+    if skipped:
+        parts.append(f"pominięto {skipped} istniejących")
+    console.print(f"\n[bold]{', '.join(parts)} w {output_dir}/[/bold]")
 
 
 def cleanup_rejected_pdfs(review_state, year_month):
