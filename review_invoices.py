@@ -125,30 +125,54 @@ def parse_invoice(xml_path):
     kwota_brutto = text(fa, "P_15")
     waluta = text(fa, "KodWaluty", "PLN")
 
+    # Suma netto = suma wszystkich P_13_* (kwoty netto per stawka VAT)
+    kwota_netto_total = 0.0
+    for child in fa:
+        local_tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local_tag.startswith("P_13_") and child.text:
+            try:
+                kwota_netto_total += float(child.text)
+            except ValueError:
+                pass
+    kwota_netto = f"{kwota_netto_total:.2f}" if kwota_netto_total else ""
+
     pozycje = []
     for wiersz in xpath_local(fa, "FaWiersz"):
         opis = text(wiersz, "P_7")
         kwota_netto_str = text(wiersz, "P_11")
+        kwota_brutto_wiersz = text(wiersz, "P_11A")
+        stawka_vat = text(wiersz, "P_12")
         if not kwota_netto_str:
             # P_11A to wartość brutto wiersza — przelicz na netto
-            kwota_brutto_wiersz = text(wiersz, "P_11A")
-            stawka_vat = text(wiersz, "P_12")
             if kwota_brutto_wiersz and stawka_vat:
                 try:
-                    brutto = float(kwota_brutto_wiersz)
+                    brutto_val = float(kwota_brutto_wiersz)
                     vat = float(stawka_vat)
-                    kwota_netto_str = f"{brutto / (1 + vat / 100):.2f}"
+                    kwota_netto_str = f"{brutto_val / (1 + vat / 100):.2f}"
                 except (ValueError, ZeroDivisionError):
                     kwota_netto_str = kwota_brutto_wiersz
             else:
                 kwota_netto_str = kwota_brutto_wiersz or ""
-        pozycje.append({"opis": opis, "kwota_netto": kwota_netto_str})
+        elif not kwota_brutto_wiersz and stawka_vat:
+            # P_11 jest, ale brak P_11A — oblicz brutto z netto + VAT
+            try:
+                netto_val = float(kwota_netto_str)
+                vat = float(stawka_vat)
+                kwota_brutto_wiersz = f"{netto_val * (1 + vat / 100):.2f}"
+            except (ValueError, ZeroDivisionError):
+                pass
+        pozycje.append({
+            "opis": opis,
+            "kwota_netto": kwota_netto_str,
+            "kwota_brutto": kwota_brutto_wiersz or "",
+        })
 
     return {
         "path": xml_path,
         "nazwa": nazwa,
         "data": data_faktury,
         "numer": numer_faktury,
+        "kwota_netto": kwota_netto,
         "kwota_brutto": kwota_brutto,
         "waluta": waluta,
         "pozycje": pozycje,
@@ -231,19 +255,21 @@ class InvoiceDetailScreen(ModalScreen):
                 id="detail-meta",
             )
             table = DataTable(id="detail-positions")
-            table.add_columns("#", "Opis", "Kwota netto")
+            table.add_columns("#", "Opis", "Netto", "Brutto")
             if inv["pozycje"]:
                 for j, poz in enumerate(inv["pozycje"], 1):
                     table.add_row(
                         str(j),
                         poz["opis"],
                         f"{poz['kwota_netto']} {inv['waluta']}",
+                        f"{poz['kwota_brutto']} {inv['waluta']}" if poz["kwota_brutto"] else "",
                     )
             else:
-                table.add_row("", "(brak pozycji)", "")
+                table.add_row("", "(brak pozycji)", "", "")
             yield table
+            netto_str = f"Kwota netto: {inv['kwota_netto']} {inv['waluta']}  |  " if inv["kwota_netto"] else ""
             yield Static(
-                f"Kwota brutto: {inv['kwota_brutto']} {inv['waluta']}",
+                f"{netto_str}Kwota brutto: {inv['kwota_brutto']} {inv['waluta']}",
                 id="detail-brutto",
             )
 
@@ -305,20 +331,21 @@ class InvoiceReviewApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#invoices", DataTable)
-        col_keys = table.add_columns("#", " ", "Data", "Kontrahent", "Numer", "Brutto")
+        col_keys = table.add_columns("#", " ", "Data", "Kontrahent", "Numer", "Netto", "Brutto")
         self._status_col = col_keys[1]
         for i, inv in enumerate(self.invoices):
             key = invoice_key(inv)
             decision = self.decisions.get(key)
             icon = _status_icon(decision)
-            kwota = f"{inv['kwota_brutto']} {inv['waluta']}"
+            netto = f"{inv['kwota_netto']} {inv['waluta']}" if inv["kwota_netto"] else ""
+            brutto = f"{inv['kwota_brutto']} {inv['waluta']}"
             table.add_row(
                 str(i + 1), icon, inv["data"], inv["nazwa"],
-                inv["numer"], kwota,
+                inv["numer"], netto, brutto,
                 key=key,
             )
         pos_table = self.query_one("#positions", DataTable)
-        pos_table.add_columns("#", "Opis", "Kwota netto")
+        pos_table.add_columns("#", "Opis", "Netto", "Brutto")
         self._update_summary()
         if self.invoices:
             self._update_positions(invoice_key(self.invoices[0]))
@@ -368,9 +395,10 @@ class InvoiceReviewApp(App):
                     str(j),
                     poz["opis"],
                     f"{poz['kwota_netto']} {inv['waluta']}",
+                    f"{poz['kwota_brutto']} {inv['waluta']}" if poz["kwota_brutto"] else "",
                 )
         else:
-            pos_table.add_row("", "(brak pozycji)", "")
+            pos_table.add_row("", "(brak pozycji)", "", "")
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Aktualizuje panel pozycji przy zmianie podświetlonego wiersza."""
