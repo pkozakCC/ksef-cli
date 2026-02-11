@@ -3,17 +3,12 @@
 
 import os
 import re
-import sys
-import glob
-import argparse
 from lxml import etree
 from weasyprint import HTML, CSS
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-INVOICES_DIR = "faktury"
-OUTPUT_DIR = "faktury_pdf"
-XSLT_DIR = "xslt"
-FONTS_DIR = os.path.join(SCRIPT_DIR, "fonts")
+XSLT_DIR = os.path.join(SCRIPT_DIR, "resources", "xslt")
+FONTS_DIR = os.path.join(SCRIPT_DIR, "resources", "fonts")
 
 # Mapowanie namespace XML → plik XSLT
 NAMESPACE_XSLT_MAP = {
@@ -99,39 +94,3 @@ def transform_to_pdf(xml_path, output_dir):
 
     HTML(string=html_string).write_pdf(pdf_path)
     return pdf_path
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Transformacja faktur XML do PDF")
-    parser.add_argument("--input", default=INVOICES_DIR, help=f"Folder z fakturami XML (domyślnie: {INVOICES_DIR})")
-    parser.add_argument("--output", default=OUTPUT_DIR, help=f"Folder wyjściowy PDF (domyślnie: {OUTPUT_DIR})")
-    args = parser.parse_args()
-
-    if not os.path.isdir(args.input):
-        print(f"Folder wejściowy nie istnieje: {args.input}")
-        sys.exit(1)
-
-    os.makedirs(args.output, exist_ok=True)
-
-    xml_files = glob.glob(os.path.join(args.input, "*.xml"))
-    if not xml_files:
-        print(f"Brak plików XML w folderze: {args.input}")
-        sys.exit(0)
-
-    print(f"Znaleziono {len(xml_files)} faktur do transformacji")
-
-    success = 0
-    for xml_path in xml_files:
-        filename = os.path.basename(xml_path)
-        try:
-            pdf_path = transform_to_pdf(xml_path, args.output)
-            print(f"  OK: {filename} -> {os.path.basename(pdf_path)}")
-            success += 1
-        except Exception as e:
-            print(f"  BŁĄD: {filename} - {e}")
-
-    print(f"\nPrzetransformowano {success}/{len(xml_files)} faktur")
-
-
-if __name__ == "__main__":
-    main()

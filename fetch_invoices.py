@@ -13,6 +13,7 @@ from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set, Optional
+from lxml import etree
 from dotenv import load_dotenv
 
 from client import KSeFClient
@@ -21,7 +22,7 @@ from crypto import Crypto
 
 # Ścieżki
 BASE_DIR = Path(__file__).parent
-FAKTURY_DIR = BASE_DIR / "faktury"
+INVOICES_RAW_DIR = BASE_DIR / "resources" / "invoices-raw"
 STATE_FILE = BASE_DIR / ".ksef_state.json"
 
 
@@ -37,7 +38,7 @@ class InvoiceFetcher:
         self.crypto = Crypto()
         
         # Twórz katalog na faktury jeśli nie istnieje
-        FAKTURY_DIR.mkdir(exist_ok=True)
+        INVOICES_RAW_DIR.mkdir(parents=True, exist_ok=True)
         
         # Załaduj stan ostatniego pobierania
         self.state = self._load_state()
@@ -161,7 +162,7 @@ class InvoiceFetcher:
                     self._save_invoice(zf, filename, metadata)
     
     def _save_invoice(self, zf: zipfile.ZipFile, filename: str, metadata: Optional[Dict]):
-        """Zapisuje fakturę do pliku"""
+        """Zapisuje fakturę do pliku, grupując po miesiącu wystawienia."""
         # Wyciągnij numer KSeF z metadanych
         ksef_number = None
         if metadata and 'invoices' in metadata:
@@ -171,28 +172,49 @@ class InvoiceFetcher:
                 if inv_filename == filename:
                     ksef_number = inv['ksefNumber']
                     break
-        
+
         # Jeśli nie ma w metadanych, spróbuj wyciągnąć z nazwy pliku
         if not ksef_number:
             ksef_number = filename.replace('.xml', '')
-        
-        # Sprawdź deduplikację
+
+        # Sprawdź deduplikację (in-memory)
         if ksef_number in self.downloaded_invoices:
             return
-        
-        # Sprawdź czy już istnieje na dysku
-        invoice_path = FAKTURY_DIR / filename
-        if invoice_path.exists():
-            self.downloaded_invoices.add(ksef_number)
-            return
-        
-        # Zapisz fakturę
+
+        # Sprawdź czy już istnieje na dysku (w dowolnym podfolderze)
+        if INVOICES_RAW_DIR.exists():
+            for subdir in INVOICES_RAW_DIR.iterdir():
+                if subdir.is_dir() and (subdir / filename).exists():
+                    self.downloaded_invoices.add(ksef_number)
+                    return
+
+        # Odczytaj zawartość XML
         with zf.open(filename) as f:
             invoice_content = f.read()
-        
+
+        # Wyciągnij datę wystawienia (P_1) z XML do grupowania po miesiącach
+        try:
+            root = etree.fromstring(invoice_content)
+            fa_nodes = root.xpath("//*[local-name()='Fa']")
+            if fa_nodes:
+                p1_nodes = fa_nodes[0].xpath("*[local-name()='P_1']")
+                if p1_nodes and p1_nodes[0].text:
+                    year_month = p1_nodes[0].text.strip()[:7]  # YYYY-MM
+                else:
+                    year_month = datetime.now(timezone.utc).strftime("%Y-%m")
+            else:
+                year_month = datetime.now(timezone.utc).strftime("%Y-%m")
+        except Exception:
+            year_month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+        # Utwórz podfolder miesiąca i zapisz
+        month_dir = INVOICES_RAW_DIR / year_month
+        month_dir.mkdir(parents=True, exist_ok=True)
+
+        invoice_path = month_dir / filename
         with open(invoice_path, 'wb') as f:
             f.write(invoice_content)
-        
+
         # Dodaj do listy nowych
         self.downloaded_invoices.add(ksef_number)
         self.new_invoices.append({

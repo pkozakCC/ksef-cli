@@ -20,8 +20,8 @@ from textual.widgets import DataTable, Footer, Static
 from textual.containers import Vertical
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-INVOICES_DIR = os.path.join(SCRIPT_DIR, "faktury")
-OUTPUT_BASE_DIR = os.path.join(SCRIPT_DIR, "faktury_potwierdzone")
+INVOICES_DIR = os.path.join(SCRIPT_DIR, "resources", "invoices-raw")
+OUTPUT_BASE_DIR = os.path.join(SCRIPT_DIR, "resources", "invoices-confirmed")
 REVIEW_STATE_FILE = os.path.join(SCRIPT_DIR, ".review_state.json")
 
 # Stany decyzji
@@ -143,18 +143,16 @@ def parse_invoice(xml_path):
 
 
 def load_invoices(year_month):
-    """Ładuje i filtruje faktury po wybranym miesiącu."""
-    xml_files = glob.glob(os.path.join(INVOICES_DIR, "*.xml"))
+    """Ładuje faktury z podfolderu danego miesiąca."""
+    month_dir = os.path.join(INVOICES_DIR, year_month)
+    xml_files = glob.glob(os.path.join(month_dir, "*.xml"))
     if not xml_files:
-        console.print("[yellow]Brak faktur XML w folderze faktury/[/yellow]")
-        sys.exit(0)
+        return []
 
     invoices = []
     for xml_path in sorted(xml_files):
         inv = parse_invoice(xml_path)
-        if inv is None:
-            continue
-        if inv["data"].startswith(year_month):
+        if inv is not None:
             invoices.append(inv)
 
     return invoices
@@ -394,6 +392,14 @@ def generate_pdfs(accepted, year_month):
         filename = os.path.basename(inv["path"])
         try:
             pdf_path = transform_to_pdf(inv["path"], output_dir)
+            # Ustaw datę modyfikacji PDF na datę wystawienia faktury
+            if inv.get("data"):
+                try:
+                    invoice_dt = datetime.strptime(inv["data"], "%Y-%m-%d")
+                    ts = invoice_dt.timestamp()
+                    os.utime(pdf_path, (ts, ts))
+                except (ValueError, OSError):
+                    pass
             console.print(f"  [green]OK:[/green] {filename} -> {os.path.basename(pdf_path)}")
             success += 1
         except Exception as e:

@@ -1,6 +1,7 @@
 __pycache__/
 
-faktury/
+resources/invoices-raw/
+resources/invoices-confirmed/
 ksef-docs/
 venv/
 
