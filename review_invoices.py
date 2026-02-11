@@ -130,15 +130,13 @@ def available_months():
         return []
     months = []
     for name in os.listdir(INVOICES_DIR):
-        path = os.path.join(INVOICES_DIR, name)
-        if not os.path.isdir(path):
+        if not os.path.isdir(os.path.join(INVOICES_DIR, name)):
             continue
         try:
             datetime.strptime(name, "%Y-%m")
         except ValueError:
             continue
-        if glob.glob(os.path.join(path, "*.xml")):
-            months.append(name)
+        months.append(name)
     months.sort(reverse=True)
     return months
 
