@@ -101,38 +101,18 @@ def invoice_key(inv):
     return os.path.basename(inv["path"])
 
 
-# --- Wybór miesiąca i pobieranie ---
+# --- Pobieranie i wybór miesiąca ---
 
-def suggest_month():
-    """Sugeruje miesiąc do przeglądu: poprzedni jeśli dzień <= 15, bieżący jeśli > 15."""
-    today = date.today()
-    if today.day <= 15:
-        if today.month == 1:
-            return f"{today.year - 1}-12"
-        return f"{today.year}-{today.month - 1:02d}"
-    return f"{today.year}-{today.month:02d}"
-
-
-def choose_month():
-    """Pozwala użytkownikowi wybrać miesiąc."""
-    suggested = suggest_month()
-    user_input = questionary.text(
-        "Miesiąc do przeglądu (YYYY-MM):",
-        default=suggested,
+def maybe_fetch_invoices():
+    """Pyta użytkownika czy pobrać zaległe faktury, i jeśli tak — pobiera."""
+    answer = questionary.confirm(
+        "Pobrać zaległe faktury z KSeF?",
+        default=True,
     ).ask()
-    if user_input is None:
+    if answer is None:
         sys.exit(0)
-    user_input = user_input.strip()
-    try:
-        datetime.strptime(user_input, "%Y-%m")
-    except ValueError:
-        console.print("[red]Nieprawidłowy format. Oczekiwany: YYYY-MM[/red]")
-        sys.exit(1)
-    return user_input
-
-
-def fetch_new_invoices():
-    """Pobiera zaległe faktury przez fetch_invoices.py."""
+    if not answer:
+        return
     with console.status("Pobieranie zaległych faktur z KSeF..."):
         result = subprocess.run(
             [sys.executable, os.path.join(SCRIPT_DIR, "fetch_invoices.py"), "--format", "text"],
@@ -142,6 +122,40 @@ def fetch_new_invoices():
         console.print(result.stdout.strip())
     else:
         console.print(f"[yellow]Uwaga: pobieranie nie powiodło się: {result.stderr.strip()}[/yellow]")
+
+
+def available_months():
+    """Zwraca listę miesięcy (YYYY-MM) z co najmniej jedną fakturą, od najnowszego."""
+    if not os.path.isdir(INVOICES_DIR):
+        return []
+    months = []
+    for name in os.listdir(INVOICES_DIR):
+        path = os.path.join(INVOICES_DIR, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            datetime.strptime(name, "%Y-%m")
+        except ValueError:
+            continue
+        if glob.glob(os.path.join(path, "*.xml")):
+            months.append(name)
+    months.sort(reverse=True)
+    return months
+
+
+def choose_month():
+    """Pozwala użytkownikowi wybrać miesiąc z listy dostępnych."""
+    months = available_months()
+    if not months:
+        console.print("[yellow]Brak faktur w katalogu invoices-raw.[/yellow]")
+        sys.exit(0)
+    chosen = questionary.select(
+        "Miesiąc do przeglądu:",
+        choices=months,
+    ).ask()
+    if chosen is None:
+        sys.exit(0)
+    return chosen
 
 
 # --- Parsowanie XML ---
@@ -614,8 +628,8 @@ def cleanup_rejected_pdfs(review_state, year_month):
 def main():
     console.print("[bold blue]Przegląd faktur KSeF[/bold blue]")
 
+    maybe_fetch_invoices()
     year_month = choose_month()
-    fetch_new_invoices()
 
     console.print(f"\nSzukam faktur za [bold]{year_month}[/bold]...")
     invoices = load_invoices(year_month)
