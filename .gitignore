@@ -6,3 +6,4 @@ venv/
 
 .env
 .ksef_state.json
+.review_state.json

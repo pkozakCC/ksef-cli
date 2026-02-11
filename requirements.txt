@@ -3,3 +3,6 @@ cryptography>=41.0.0
 python-dotenv>=1.0.0
 lxml>=4.9.0
 weasyprint>=60.0
+rich>=13.0
+questionary>=2.0
+textual>=0.80.0
