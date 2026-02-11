@@ -341,6 +341,7 @@ class InvoiceReviewApp(App):
     TITLE = "Przegląd faktur KSeF"
 
     BINDINGS = [
+        Binding("space", "toggle", "Przełącz"),
         Binding("a", "accept", "Akceptuj"),
         Binding("r", "reject", "Odrzuć"),
         Binding("d", "detail", "d/Enter Szczegóły"),
@@ -351,7 +352,7 @@ class InvoiceReviewApp(App):
     DEFAULT_CSS = """
     #summary {
         dock: top;
-        height: 1;
+        height: 3;
         padding: 0 1;
         background: $accent;
         color: $text;
@@ -409,6 +410,8 @@ class InvoiceReviewApp(App):
                 _fmt_amount(inv["kwota_brutto"]),
                 key=key,
             )
+        pos_table = self.query_one("#positions", DataTable)
+        pos_table.add_columns("#", "Opis", f"Netto ({waluta})", f"Brutto ({waluta})")
         self._update_summary()
         if self.invoices:
             self._update_positions(invoice_key(self.invoices[0]))
@@ -429,14 +432,31 @@ class InvoiceReviewApp(App):
         table.update_cell(key, self._status_col, icon)
 
     def _update_summary(self):
-        """Aktualizuje pasek podsumowania."""
-        accepted = sum(1 for d in self.decisions.values() if d == ACCEPTED)
-        rejected = sum(1 for d in self.decisions.values() if d == REJECTED)
-        undecided = len(self.invoices) - accepted - rejected
+        """Aktualizuje pasek podsumowania z sumami kwot."""
+        acc_count = rej_count = 0
+        all_netto = all_brutto = 0.0
+        acc_netto = acc_brutto = 0.0
+        rej_netto = rej_brutto = 0.0
+        for inv in self.invoices:
+            netto = float(inv["kwota_netto"]) if inv["kwota_netto"] else 0.0
+            brutto = float(inv["kwota_brutto"]) if inv["kwota_brutto"] else 0.0
+            all_netto += netto
+            all_brutto += brutto
+            decision = self.decisions.get(invoice_key(inv))
+            if decision == ACCEPTED:
+                acc_count += 1
+                acc_netto += netto
+                acc_brutto += brutto
+            elif decision == REJECTED:
+                rej_count += 1
+                rej_netto += netto
+                rej_brutto += brutto
+        undecided = len(self.invoices) - acc_count - rej_count
+        line1 = f"  V: {acc_count}   X: {rej_count}   ?: {undecided}   │  Razem: {len(self.invoices)}"
+        line2 = f"  Σ  netto: {all_netto:>10.2f}   brutto: {all_brutto:>10.2f}"
+        line3 = f"  V  netto: {acc_netto:>10.2f}   brutto: {acc_brutto:>10.2f}   │  X  netto: {rej_netto:>10.2f}   brutto: {rej_brutto:>10.2f}"
         summary = self.query_one("#summary", Static)
-        summary.update(
-            f"  V: {accepted}   X: {rejected}   ?: {undecided}   │  Razem: {len(self.invoices)}"
-        )
+        summary.update(f"{line1}\n{line2}\n{line3}")
 
     def _move_cursor_down(self):
         """Przesuwa kursor o jeden wiersz w dół."""
@@ -448,12 +468,10 @@ class InvoiceReviewApp(App):
     def _update_positions(self, key):
         """Aktualizuje tabelę pozycji dla podanej faktury."""
         pos_table = self.query_one("#positions", DataTable)
-        pos_table.clear(columns=True)
+        pos_table.clear()
         inv = self._inv_by_key.get(key)
         if not inv:
             return
-        waluta = inv["waluta"]
-        pos_table.add_columns("#", "Opis", f"Netto ({waluta})", f"Brutto ({waluta})")
         if inv["pozycje"]:
             for j, poz in enumerate(inv["pozycje"], 1):
                 pos_table.add_row(
@@ -487,6 +505,16 @@ class InvoiceReviewApp(App):
         if key is None:
             return
         self.decisions[key] = REJECTED
+        self._refresh_row(key)
+        self._update_summary()
+        self._move_cursor_down()
+
+    def action_toggle(self) -> None:
+        key = self._get_current_key()
+        if key is None:
+            return
+        current = self.decisions.get(key)
+        self.decisions[key] = REJECTED if current == ACCEPTED else ACCEPTED
         self._refresh_row(key)
         self._update_summary()
         self._move_cursor_down()
