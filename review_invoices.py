@@ -255,6 +255,16 @@ def _status_icon(decision):
     return Text("?", style="bold yellow")
 
 
+def _fmt_amount(value):
+    """Formatuje kwotę: zawsze 2 miejsca po przecinku, justowanie do prawej."""
+    if not value:
+        return Text("", justify="right")
+    try:
+        return Text(f"{float(value):.2f}", justify="right")
+    except (ValueError, TypeError):
+        return Text(value, justify="right")
+
+
 # --- Textual TUI ---
 
 class InvoiceDetailScreen(ModalScreen):
@@ -303,22 +313,24 @@ class InvoiceDetailScreen(ModalScreen):
                 f"Numer: {inv['numer']}\nData:  {inv['data']}\nKontrahent: {inv['nazwa']}",
                 id="detail-meta",
             )
+            waluta = inv["waluta"]
             table = DataTable(id="detail-positions")
-            table.add_columns("#", "Opis", "Netto", "Brutto")
+            table.add_columns("#", "Opis", f"Netto ({waluta})", f"Brutto ({waluta})")
             if inv["pozycje"]:
                 for j, poz in enumerate(inv["pozycje"], 1):
                     table.add_row(
                         str(j),
                         poz["opis"],
-                        f"{poz['kwota_netto']} {inv['waluta']}",
-                        f"{poz['kwota_brutto']} {inv['waluta']}" if poz["kwota_brutto"] else "",
+                        _fmt_amount(poz["kwota_netto"]),
+                        _fmt_amount(poz["kwota_brutto"]),
                     )
             else:
                 table.add_row("", "(brak pozycji)", "", "")
             yield table
-            netto_str = f"Kwota netto: {inv['kwota_netto']} {inv['waluta']}  |  " if inv["kwota_netto"] else ""
+            netto_str = f"Netto: {float(inv['kwota_netto']):.2f}  |  " if inv["kwota_netto"] else ""
+            brutto_str = f"Brutto: {float(inv['kwota_brutto']):.2f}" if inv["kwota_brutto"] else ""
             yield Static(
-                f"{netto_str}Kwota brutto: {inv['kwota_brutto']} {inv['waluta']}",
+                f"{netto_str}{brutto_str} {waluta}",
                 id="detail-brutto",
             )
 
@@ -380,21 +392,23 @@ class InvoiceReviewApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#invoices", DataTable)
-        col_keys = table.add_columns("#", " ", "Data", "Kontrahent", "Numer", "Netto", "Brutto")
+        waluta = self.invoices[0]["waluta"] if self.invoices else "PLN"
+        col_keys = table.add_columns(
+            "#", " ", "Data", "Kontrahent", "Numer",
+            f"Netto ({waluta})", f"Brutto ({waluta})",
+        )
         self._status_col = col_keys[1]
         for i, inv in enumerate(self.invoices):
             key = invoice_key(inv)
             decision = self.decisions.get(key)
             icon = _status_icon(decision)
-            netto = f"{inv['kwota_netto']} {inv['waluta']}" if inv["kwota_netto"] else ""
-            brutto = f"{inv['kwota_brutto']} {inv['waluta']}"
             table.add_row(
                 str(i + 1), icon, inv["data"], inv["nazwa"],
-                inv["numer"], netto, brutto,
+                inv["numer"],
+                _fmt_amount(inv["kwota_netto"]),
+                _fmt_amount(inv["kwota_brutto"]),
                 key=key,
             )
-        pos_table = self.query_one("#positions", DataTable)
-        pos_table.add_columns("#", "Opis", "Netto", "Brutto")
         self._update_summary()
         if self.invoices:
             self._update_positions(invoice_key(self.invoices[0]))
@@ -434,17 +448,19 @@ class InvoiceReviewApp(App):
     def _update_positions(self, key):
         """Aktualizuje tabelę pozycji dla podanej faktury."""
         pos_table = self.query_one("#positions", DataTable)
-        pos_table.clear()
+        pos_table.clear(columns=True)
         inv = self._inv_by_key.get(key)
         if not inv:
             return
+        waluta = inv["waluta"]
+        pos_table.add_columns("#", "Opis", f"Netto ({waluta})", f"Brutto ({waluta})")
         if inv["pozycje"]:
             for j, poz in enumerate(inv["pozycje"], 1):
                 pos_table.add_row(
                     str(j),
                     poz["opis"],
-                    f"{poz['kwota_netto']} {inv['waluta']}",
-                    f"{poz['kwota_brutto']} {inv['waluta']}" if poz["kwota_brutto"] else "",
+                    _fmt_amount(poz["kwota_netto"]),
+                    _fmt_amount(poz["kwota_brutto"]),
                 )
         else:
             pos_table.add_row("", "(brak pozycji)", "", "")
