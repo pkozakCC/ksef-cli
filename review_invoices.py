@@ -6,6 +6,7 @@ import re
 import sys
 import glob
 import json
+import time
 import subprocess
 import unicodedata
 from datetime import datetime, date
@@ -395,6 +396,8 @@ class InvoiceReviewApp(App):
             self._inv_by_key[key] = inv
             if key in review_state:
                 self.decisions[key] = review_state[key]["decision"]
+        self._initial_decisions = dict(self.decisions)
+        self._last_quit_press = 0.0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="summary")
@@ -545,26 +548,42 @@ class InvoiceReviewApp(App):
             self.push_screen(InvoiceDetailScreen(self._inv_by_key[key]))
 
     def action_save(self) -> None:
-        undecided = len(self.invoices) - len(self.decisions)
-        if undecided > 0:
-            self.notify(
-                f"Pozostało {undecided} faktur bez decyzji. Zaakceptuj lub odrzuć wszystkie.",
-                severity="warning",
-                timeout=5,
-            )
-            return
         for key, decision in self.decisions.items():
             existing = self.review_state.get(key, {})
             existing["decision"] = decision
             self.review_state[key] = existing
         save_review_state(self.review_state)
+        self._initial_decisions = dict(self.decisions)
+        undecided = len(self.invoices) - len(self.decisions)
+        if undecided > 0:
+            self.notify(
+                f"Zapisano. Pozostało {undecided} faktur bez decyzji.",
+                severity="information",
+                timeout=3,
+            )
+            return
         accepted = [
             self._inv_by_key[k] for k, v in self.decisions.items() if v == ACCEPTED
         ]
         self.exit(accepted if accepted else None)
 
+    def _has_unsaved_changes(self) -> bool:
+        return self.decisions != self._initial_decisions
+
     def action_quit_app(self) -> None:
-        self.exit(None)
+        if not self._has_unsaved_changes():
+            self.exit(None)
+            return
+        now = time.monotonic()
+        if now - self._last_quit_press < 3.0:
+            self.exit(None)
+            return
+        self._last_quit_press = now
+        self.notify(
+            "Masz niezapisane zmiany. Naciśnij q ponownie, aby wyjść.",
+            severity="warning",
+            timeout=3,
+        )
 
 
 # --- Generowanie PDF ---
